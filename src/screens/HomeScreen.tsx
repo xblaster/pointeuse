@@ -182,7 +182,7 @@ export default function HomeScreen() {
                     {entry.lunchDeducted && (
                       <View style={styles.deductBadge}>
                         <Text style={styles.deductBadgeText}>
-                          −30 min pause déduite
+                          −{formatDuration(entry.rawDuration - entry.duration)} pause déduite
                         </Text>
                       </View>
                     )}

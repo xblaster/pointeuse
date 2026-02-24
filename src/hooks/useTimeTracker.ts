@@ -22,28 +22,32 @@ function buildInitialState(): TrackerState {
 /**
  * LOGIQUE DE DÉDUCTION DE LA PAUSE MIDI
  *
- * Règle métier : si l'employé n'a pas pris au moins 30 minutes de pause
- * dans la fenêtre de midi (11h30 – 13h30), on déduit automatiquement
- * 30 minutes du temps de travail effectif lors du pointage de sortie.
+ * Règle métier précise : si la meilleure pause prise dans la fenêtre de midi
+ * (11h30 – 13h30) vaut P minutes, on déduit (30 - P) minutes du temps de
+ * travail effectif, de façon à ce que la pause atteigne toujours 30 minutes.
+ * Si aucune pause n'est trouvée dans cette fenêtre, P = 0 → déduction = 30 min.
+ * Si P >= 30 min → déduction = 0 (aucun prélèvement).
  *
  * Algorithme :
  *  1. On reconstitue la liste ordonnée de toutes les sessions du jour
  *     (historique déjà enregistré + session en cours qui se termine).
  *  2. On calcule les intervalles (pauses) entre deux sessions consécutives.
- *  3. Une pause est "adéquate" si elle intersecte la fenêtre de midi
- *     ET dure au moins 30 minutes.
- *  4. Si aucune pause adéquate n'est trouvée → renvoie false → déduction.
+ *  3. On retient la plus longue pause qui chevauche la fenêtre de midi :
+ *     c'est la "meilleure pause" P de l'employé.
+ *  4. On retourne max(0, 30min - P) en millisecondes.
  *
  * @param todayHistory  Sessions déjà terminées aujourd'hui.
  * @param currentStart  Début de la session en cours d'arrêt.
  * @param currentEnd    Moment du clic sur "SORTIE".
- * @returns true si une pause midi suffisante a été prise, false sinon.
+ * @returns Millisecondes à déduire du temps travaillé (0 si pause suffisante).
  */
-function hasAdequateLunchBreak(
+function getLunchDeductionMs(
   todayHistory: SessionEntry[],
   currentStart: Date,
   currentEnd: Date,
-): boolean {
+): number {
+  const THIRTY_MIN_MS = 30 * 60 * 1000;
+
   // Toutes les sessions du jour, triées par heure de début
   const allSessions = [
     ...todayHistory.map((h) => ({
@@ -55,12 +59,15 @@ function hasAdequateLunchBreak(
 
   // Fenêtre de midi : 11h30 → 13h30 (même journée que currentEnd)
   const y = currentEnd.getFullYear();
-  const m = currentEnd.getMonth();
+  const mo = currentEnd.getMonth();
   const d = currentEnd.getDate();
-  const noonWindowStart = new Date(y, m, d, 11, 30, 0, 0);
-  const noonWindowEnd = new Date(y, m, d, 13, 30, 0, 0);
+  const noonWindowStart = new Date(y, mo, d, 11, 30, 0, 0);
+  const noonWindowEnd = new Date(y, mo, d, 13, 30, 0, 0);
 
-  // Analyse des pauses entre sessions consécutives
+  // Recherche de la meilleure pause (la plus longue) dans la fenêtre de midi
+  let bestPauseMs = 0;
+  let foundPauseInNoon = false;
+
   for (let i = 0; i < allSessions.length - 1; i++) {
     const pauseStart = allSessions[i].end;
     const pauseEnd = allSessions[i + 1].start;
@@ -70,12 +77,20 @@ function hasAdequateLunchBreak(
     const overlapsNoon =
       pauseStart < noonWindowEnd && pauseEnd > noonWindowStart;
 
-    if (overlapsNoon && pauseMs >= 30 * 60 * 1000) {
-      return true; // Pause midi suffisante trouvée
+    if (overlapsNoon) {
+      foundPauseInNoon = true;
+      if (pauseMs > bestPauseMs) bestPauseMs = pauseMs;
     }
   }
 
-  return false; // Aucune pause midi adéquate
+  // Aucune pause dans la fenêtre → P = 0 → déduction = 30 min
+  if (!foundPauseInNoon) return THIRTY_MIN_MS;
+
+  // Pause suffisante → aucune déduction
+  if (bestPauseMs >= THIRTY_MIN_MS) return 0;
+
+  // Déduction = (30 min - P) pour compléter la pause au minimum légal
+  return THIRTY_MIN_MS - bestPauseMs;
 }
 
 // ---------------------------------------------------------------------------
@@ -212,30 +227,34 @@ export function useTimeTracker() {
     /**
      * APPLICATION DE LA DÉDUCTION PAUSE MIDI
      *
-     * La déduction de 30 minutes est appliquée si et seulement si :
+     * La déduction est appliquée si et seulement si :
      *   1. Elle n'a pas déjà été appliquée aujourd'hui (pour éviter un double
      *      prélèvement sur une journée avec plusieurs sessions).
      *   2. L'heure actuelle est >= 12h30 (la fenêtre de midi est supposément
      *      passée ; on ne déduit pas si l'employé part avant midi).
-     *   3. Aucune pause d'au moins 30 min n'a été détectée dans la fenêtre
-     *      11h30–13h30 (cf. fonction hasAdequateLunchBreak).
      *
-     * La déduction s'applique sur la session courante (la dernière de la
-     * journée, celle qui déclenche ce clockOut).
+     * Le montant déduit est variable : si la pause P est < 30 min, on retire
+     * exactement (30 - P) minutes, de façon à "compléter" la pause à 30 min.
+     * Exemples :
+     *   P = 0 min  → déduction = 30 min
+     *   P = 20 min → déduction = 10 min
+     *   P = 30 min → déduction = 0 min (aucun prélèvement)
      */
     const alreadyDeductedToday = todayHistory.some((h) => h.lunchDeducted);
     const isAfterNoonWindow =
       now.getHours() > 12 ||
       (now.getHours() === 12 && now.getMinutes() >= 30);
-    const lunchAdequate = hasAdequateLunchBreak(todayHistory, sessionStart, now);
 
     let effectiveDurationMs = rawDurationMs;
     let lunchDeducted = false;
 
-    if (!alreadyDeductedToday && isAfterNoonWindow && !lunchAdequate) {
-      // Déduction de 30 minutes (minimum 0 ms pour éviter un temps négatif)
-      effectiveDurationMs = Math.max(0, rawDurationMs - 30 * 60 * 1000);
-      lunchDeducted = true;
+    if (!alreadyDeductedToday && isAfterNoonWindow) {
+      const deductionMs = getLunchDeductionMs(todayHistory, sessionStart, now);
+      if (deductionMs > 0) {
+        // minimum 0 ms pour éviter un temps effectif négatif
+        effectiveDurationMs = Math.max(0, rawDurationMs - deductionMs);
+        lunchDeducted = true;
+      }
     }
 
     const newEntry: SessionEntry = {
