@@ -1,89 +1,95 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { doc, setDoc, onSnapshot } from 'firebase/firestore';
+import { db } from '../firebase';
 import { TrackerState, SessionEntry } from '../types';
 import { getNextMonthlyResetDate } from '../utils/timeUtils';
-import { getLunchDeductionMs } from '../utils/lunchDeduction';
+import { ComplianceEngine, ComplianceInfo } from '../compliance/complianceEngine';
 
-const STORAGE_KEY = '@pointeuse_state';
+const COLLECTION = 'users';
+const DOC_KEY = 'state';
 
-// ---------------------------------------------------------------------------
-// État initial (premier lancement, aucune donnée persistée)
-// ---------------------------------------------------------------------------
 function buildInitialState(): TrackerState {
   return {
     status: 'OUT',
     currentSessionStart: null,
     accumulatedMilliseconds: 0,
+    weeklyAccumulatedMilliseconds: 0,
+    complianceStatus: 'normal',
     nextResetDate: getNextMonthlyResetDate().toISOString(),
     history: [],
   };
 }
 
-// ---------------------------------------------------------------------------
-// Hook principal
-// ---------------------------------------------------------------------------
-export function useTimeTracker() {
+export function useTimeTracker(uid: string | null) {
   const [state, setState] = useState<TrackerState | null>(null);
   const [loading, setLoading] = useState(true);
-  /**
-   * elapsed : millisecondes écoulées depuis le début de la session en cours.
-   * Mis à jour toutes les secondes via un interval.
-   * Basé sur des timestamps (Date.now() - currentSessionStart) pour rester
-   * exact même si l'app passe en arrière-plan ou est redémarrée.
-   */
   const [elapsed, setElapsed] = useState(0);
+  const [complianceInfo, setComplianceInfo] = useState<ComplianceInfo | null>(null);
+
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // -------------------------------------------------------------------------
-  // Chargement initial depuis AsyncStorage
+  // Persistance Firestore
+  // -------------------------------------------------------------------------
+  const persist = useCallback(async (newState: TrackerState) => {
+    if (!uid) return;
+    try {
+      await setDoc(doc(db, COLLECTION, uid, DOC_KEY, 'tracker'), newState);
+    } catch (err) {
+      console.error('[Pointeuse] Erreur écriture Firestore :', err);
+    }
+  }, [uid]);
+
+  // -------------------------------------------------------------------------
+  // Chargement initial + sync temps réel via onSnapshot
   // -------------------------------------------------------------------------
   useEffect(() => {
-    (async () => {
-      try {
-        const raw = await AsyncStorage.getItem(STORAGE_KEY);
-        let loaded: TrackerState = raw
-          ? (JSON.parse(raw) as TrackerState)
-          : buildInitialState();
+    if (!uid) {
+      setState(null);
+      setLoading(false);
+      return;
+    }
 
-        /**
-         * VÉRIFICATION DU RESET MENSUEL
-         *
-         * À chaque démarrage de l'app, on compare Date.now() à nextResetDate.
-         * Si la date de reset est dépassée :
-         *   - Le cumul (accumulatedMilliseconds) est remis à zéro.
-         *   - L'historique du mois est effacé.
-         *   - La prochaine date de reset est recalculée (1er du mois suivant).
-         *
-         * Ce mécanisme garantit le reset même si l'app n'était pas ouverte
-         * exactement au moment du basculement de mois.
-         */
-        if (Date.now() >= new Date(loaded.nextResetDate).getTime()) {
-          loaded = {
-            ...loaded,
-            accumulatedMilliseconds: 0,
-            history: [],
-            // Si on a raté plusieurs mois, on recalcule à partir d'aujourd'hui
-            nextResetDate: getNextMonthlyResetDate().toISOString(),
-          };
-          // Persiste immédiatement le reset
-          await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(loaded));
-        }
+    setLoading(true);
+    const ref = doc(db, COLLECTION, uid, DOC_KEY, 'tracker');
 
-        setState(loaded);
-      } catch (err) {
-        console.error('[Pointeuse] Erreur chargement AsyncStorage :', err);
-        setState(buildInitialState());
-      } finally {
-        setLoading(false);
+    const unsubscribe = onSnapshot(ref, (snap) => {
+      let loaded: TrackerState = snap.exists()
+        ? (snap.data() as TrackerState)
+        : buildInitialState();
+
+      // Reset mensuel automatique
+      if (Date.now() >= new Date(loaded.nextResetDate).getTime()) {
+        loaded = {
+          ...loaded,
+          accumulatedMilliseconds: 0,
+          weeklyAccumulatedMilliseconds: 0,
+          history: [],
+          nextResetDate: getNextMonthlyResetDate().toISOString(),
+        };
+        void setDoc(ref, loaded);
       }
-    })();
-  }, []);
+
+      const info = ComplianceEngine.checkCompliance(loaded.history, loaded.currentSessionStart);
+      loaded.complianceStatus = info.status;
+      loaded.weeklyAccumulatedMilliseconds = info.weeklyTotalMs;
+
+      setState(loaded);
+      setComplianceInfo(info);
+      setLoading(false);
+    }, (err) => {
+      console.error('[Pointeuse] Erreur lecture Firestore :', err);
+      setState(buildInitialState());
+      setLoading(false);
+    });
+
+    return unsubscribe;
+  }, [uid]);
 
   // -------------------------------------------------------------------------
-  // Minuterie temps réel (ticker basé sur timestamps, pas sur un compteur)
+  // Minuterie temps réel
   // -------------------------------------------------------------------------
   useEffect(() => {
-    // Nettoyage de l'interval précédent dans tous les cas
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
@@ -91,15 +97,28 @@ export function useTimeTracker() {
 
     if (state?.status !== 'IN' || !state.currentSessionStart) {
       setElapsed(0);
+      if (state) {
+        const info = ComplianceEngine.checkCompliance(state.history, null);
+        setComplianceInfo(info);
+      }
       return;
     }
 
-    // On capture le timestamp de début une seule fois pour ce cycle
     const startMs = new Date(state.currentSessionStart).getTime();
 
-    const tick = () => setElapsed(Date.now() - startMs);
-    tick(); // Premier tick immédiat (pas d'affichage à 0 pendant 1 seconde)
+    const tick = () => {
+      const now = new Date();
+      setElapsed(now.getTime() - startMs);
+      if (state) {
+        const info = ComplianceEngine.checkCompliance(state.history, state.currentSessionStart, now);
+        setComplianceInfo(info);
+        if (info.status !== state.complianceStatus) {
+          setState(s => s ? { ...s, complianceStatus: info.status } : null);
+        }
+      }
+    };
 
+    tick();
     intervalRef.current = setInterval(tick, 1000);
 
     return () => {
@@ -108,37 +127,31 @@ export function useTimeTracker() {
         intervalRef.current = null;
       }
     };
-  }, [state?.status, state?.currentSessionStart]);
+  }, [state?.status, state?.currentSessionStart, state?.complianceStatus]);
 
   // -------------------------------------------------------------------------
-  // Persistance AsyncStorage
-  // -------------------------------------------------------------------------
-  const persist = useCallback(async (newState: TrackerState) => {
-    try {
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(newState));
-    } catch (err) {
-      console.error('[Pointeuse] Erreur persistance AsyncStorage :', err);
-    }
-  }, []);
-
-  // -------------------------------------------------------------------------
-  // Action : ENTRÉE (clock IN)
+  // Clock IN
   // -------------------------------------------------------------------------
   const clockIn = useCallback(async () => {
     if (!state || state.status === 'IN') return;
 
+    const start = new Date().toISOString();
+    const info = ComplianceEngine.checkCompliance(state.history, start);
+
     const newState: TrackerState = {
       ...state,
       status: 'IN',
-      currentSessionStart: new Date().toISOString(),
+      currentSessionStart: start,
+      complianceStatus: info.status,
     };
 
     setState(newState);
+    setComplianceInfo(info);
     await persist(newState);
   }, [state, persist]);
 
   // -------------------------------------------------------------------------
-  // Action : SORTIE (clock OUT)
+  // Clock OUT
   // -------------------------------------------------------------------------
   const clockOut = useCallback(async () => {
     if (!state || state.status === 'OUT' || !state.currentSessionStart) return;
@@ -147,41 +160,13 @@ export function useTimeTracker() {
     const sessionStart = new Date(state.currentSessionStart);
     const rawDurationMs = now.getTime() - sessionStart.getTime();
 
-    const today = now.toISOString().split('T')[0]; // YYYY-MM-DD
+    const today = now.toISOString().split('T')[0];
     const todayHistory = state.history.filter((h) => h.date === today);
 
-    /**
-     * APPLICATION DE LA DÉDUCTION PAUSE MIDI
-     *
-     * La déduction est appliquée si et seulement si :
-     *   1. Elle n'a pas déjà été appliquée aujourd'hui (pour éviter un double
-     *      prélèvement sur une journée avec plusieurs sessions).
-     *   2. L'heure actuelle est >= 12h30 (la fenêtre de midi est supposément
-     *      passée ; on ne déduit pas si l'employé part avant midi).
-     *
-     * Le montant déduit est variable : si la pause P est < 30 min, on retire
-     * exactement (30 - P) minutes, de façon à "compléter" la pause à 30 min.
-     * Exemples :
-     *   P = 0 min  → déduction = 30 min
-     *   P = 20 min → déduction = 10 min
-     *   P = 30 min → déduction = 0 min (aucun prélèvement)
-     */
-    const alreadyDeductedToday = todayHistory.some((h) => h.lunchDeducted);
-    const isAfterNoonWindow =
-      now.getHours() > 12 ||
-      (now.getHours() === 12 && now.getMinutes() >= 30);
-
-    let effectiveDurationMs = rawDurationMs;
-    let lunchDeducted = false;
-
-    if (!alreadyDeductedToday && isAfterNoonWindow) {
-      const deductionMs = getLunchDeductionMs(todayHistory, sessionStart, now);
-      if (deductionMs > 0) {
-        // minimum 0 ms pour éviter un temps effectif négatif
-        effectiveDurationMs = Math.max(0, rawDurationMs - deductionMs);
-        lunchDeducted = true;
-      }
-    }
+    const { deductionMs } = ComplianceEngine.getMandatoryDeductions(todayHistory, sessionStart, now);
+    const effectiveDurationMs = deductionMs > 0
+      ? Math.max(0, rawDurationMs - deductionMs)
+      : rawDurationMs;
 
     const newEntry: SessionEntry = {
       start: sessionStart.toISOString(),
@@ -189,39 +174,163 @@ export function useTimeTracker() {
       rawDuration: rawDurationMs,
       duration: effectiveDurationMs,
       date: today,
-      lunchDeducted,
+      lunchDeducted: deductionMs > 0,
     };
+
+    const newHistory = [...state.history, newEntry];
+    const info = ComplianceEngine.checkCompliance(newHistory, null, now);
 
     const newState: TrackerState = {
       ...state,
       status: 'OUT',
       currentSessionStart: null,
       accumulatedMilliseconds: state.accumulatedMilliseconds + effectiveDurationMs,
-      history: [...state.history, newEntry],
+      weeklyAccumulatedMilliseconds: info.weeklyTotalMs,
+      complianceStatus: info.status,
+      history: newHistory,
     };
 
     setState(newState);
+    setComplianceInfo(info);
+    await persist(newState);
+  }, [state, persist]);
+
+  // -------------------------------------------------------------------------
+  // updateEntry
+  // -------------------------------------------------------------------------
+  const updateEntry = useCallback(async (index: number, start: string, end: string) => {
+    if (!state) return;
+
+    const startDate = new Date(start);
+    const endDate = new Date(end);
+    const rawDurationMs = endDate.getTime() - startDate.getTime();
+    const dateStr = start.split('T')[0];
+    const otherHistory = state.history.filter((_, i) => i !== index);
+    const todayOtherHistory = otherHistory.filter((h) => h.date === dateStr);
+
+    const { deductionMs } = ComplianceEngine.getMandatoryDeductions(
+      todayOtherHistory as SessionEntry[],
+      startDate,
+      endDate
+    );
+    const effectiveDurationMs = deductionMs > 0 ? Math.max(0, rawDurationMs - deductionMs) : rawDurationMs;
+
+    const updatedEntry: SessionEntry = {
+      start,
+      end,
+      rawDuration: rawDurationMs,
+      duration: effectiveDurationMs,
+      date: dateStr,
+      lunchDeducted: deductionMs > 0,
+    };
+
+    const newHistory = [...state.history];
+    newHistory[index] = updatedEntry;
+    const accumulated = newHistory.reduce((sum, e) => sum + e.duration, 0);
+    const info = ComplianceEngine.checkCompliance(newHistory, state.currentSessionStart);
+
+    const newState: TrackerState = {
+      ...state,
+      history: newHistory,
+      accumulatedMilliseconds: accumulated,
+      weeklyAccumulatedMilliseconds: info.weeklyTotalMs,
+      complianceStatus: info.status,
+    };
+
+    setState(newState);
+    setComplianceInfo(info);
+    await persist(newState);
+  }, [state, persist]);
+
+  // -------------------------------------------------------------------------
+  // addEntry
+  // -------------------------------------------------------------------------
+  const addEntry = useCallback(async (date: string, start: string, end: string) => {
+    if (!state) return;
+
+    const startDate = new Date(start);
+    const endDate = new Date(end);
+    const rawDurationMs = endDate.getTime() - startDate.getTime();
+    const todayHistory = state.history.filter((h) => h.date === date);
+
+    const { deductionMs } = ComplianceEngine.getMandatoryDeductions(
+      todayHistory,
+      startDate,
+      endDate
+    );
+    const effectiveDurationMs = deductionMs > 0 ? Math.max(0, rawDurationMs - deductionMs) : rawDurationMs;
+
+    const newEntry: SessionEntry = {
+      start,
+      end,
+      rawDuration: rawDurationMs,
+      duration: effectiveDurationMs,
+      date,
+      lunchDeducted: deductionMs > 0,
+    };
+
+    const newHistory = [...state.history, newEntry].sort(
+      (a, b) => new Date(a.start).getTime() - new Date(b.start).getTime()
+    );
+    const accumulated = newHistory.reduce((sum, e) => sum + e.duration, 0);
+    const info = ComplianceEngine.checkCompliance(newHistory, state.currentSessionStart);
+
+    const newState: TrackerState = {
+      ...state,
+      history: newHistory,
+      accumulatedMilliseconds: accumulated,
+      weeklyAccumulatedMilliseconds: info.weeklyTotalMs,
+      complianceStatus: info.status,
+    };
+
+    setState(newState);
+    setComplianceInfo(info);
+    await persist(newState);
+  }, [state, persist]);
+
+  // -------------------------------------------------------------------------
+  // deleteEntry
+  // -------------------------------------------------------------------------
+  const deleteEntry = useCallback(async (index: number) => {
+    if (!state) return;
+
+    const newHistory = state.history.filter((_, i) => i !== index);
+    const accumulated = newHistory.reduce((sum, e) => sum + e.duration, 0);
+    const info = ComplianceEngine.checkCompliance(newHistory, state.currentSessionStart);
+
+    const newState: TrackerState = {
+      ...state,
+      history: newHistory,
+      accumulatedMilliseconds: accumulated,
+      weeklyAccumulatedMilliseconds: info.weeklyTotalMs,
+      complianceStatus: info.status,
+    };
+
+    setState(newState);
+    setComplianceInfo(info);
     await persist(newState);
   }, [state, persist]);
 
   // -------------------------------------------------------------------------
   // Valeurs exposées
   // -------------------------------------------------------------------------
-
-  /**
-   * Temps total à afficher = cumul enregistré + temps de la session en cours.
-   * Quand status === 'OUT', elapsed vaut 0, donc le cumul s'affiche seul.
-   */
   const totalMilliseconds = (state?.accumulatedMilliseconds ?? 0) + elapsed;
+  const weeklyMilliseconds = complianceInfo?.weeklyTotalMs ?? 0;
 
   return {
     loading,
     status: state?.status ?? 'OUT',
     totalMilliseconds,
+    weeklyMilliseconds,
+    complianceStatus: complianceInfo?.status ?? 'normal',
+    complianceMessages: complianceInfo?.messages ?? [],
     currentSessionStart: state?.currentSessionStart ?? null,
     history: state?.history ?? [],
     nextResetDate: state?.nextResetDate ?? null,
     clockIn,
     clockOut,
+    updateEntry,
+    deleteEntry,
+    addEntry,
   };
 }

@@ -16,6 +16,8 @@ export interface SessionEntry {
   lunchDeducted: boolean;
 }
 
+export type ComplianceStatus = 'normal' | 'warning' | 'violation';
+
 /**
  * État global de la pointeuse, persisté dans AsyncStorage.
  */
@@ -29,6 +31,10 @@ export interface TrackerState {
   currentSessionStart: string | null;
   /** Cumul total de millisecondes travaillées depuis le dernier reset mensuel */
   accumulatedMilliseconds: number;
+  /** Cumul total de millisecondes travaillées pour la semaine en cours */
+  weeklyAccumulatedMilliseconds: number;
+  /** Statut de conformité légale */
+  complianceStatus: ComplianceStatus;
   /** Date ISO du prochain reset mensuel (1er du mois suivant à 00:00:00) */
   nextResetDate: string;
   /** Historique de toutes les sessions terminées du mois en cours */
