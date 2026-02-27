@@ -1,0 +1,39 @@
+/* ── Glassmorphism Design Tokens ─────────────────────────────────────────── */
+
+:root {
+  --glass-blur: 14px;
+  --glass-bg: rgba(255, 255, 255, 0.08);
+  --glass-border: rgba(255, 255, 255, 0.15);
+  --glass-bg-fallback: rgba(20, 20, 35, 0.78);
+}
+
+/* ── Glass Surface Utility Class ─────────────────────────────────────────── */
+
+.glass-surface {
+  backdrop-filter: blur(var(--glass-blur)) saturate(150%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(150%);
+  background: var(--glass-bg) !important;
+  border: 1px solid var(--glass-border) !important;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.25) !important;
+}
+
+/* Fallback for browsers without backdrop-filter support (Firefox < 103) */
+@supports not (backdrop-filter: blur(1px)) {
+  .glass-surface {
+    background: var(--glass-bg-fallback) !important;
+  }
+}
+
+/* ── Organic Gradient Background ─────────────────────────────────────────── */
+
+.glass-app-bg {
+  background: linear-gradient(
+    135deg,
+    #0d1117 0%,
+    #1a0533 25%,
+    #0a1628 55%,
+    #051a12 85%,
+    #0d1117 100%
+  ) !important;
+  background-attachment: fixed !important;
+}

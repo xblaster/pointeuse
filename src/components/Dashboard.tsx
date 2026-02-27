@@ -19,8 +19,8 @@ import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import EditIcon from '@mui/icons-material/Edit';
 import DeleteIcon from '@mui/icons-material/Delete';
 import AddIcon from '@mui/icons-material/Add';
-import ThemeToggle from './ThemeToggle';
 import EditSessionModal from './EditSessionModal';
+import TimelineSmartBar from './TimelineSmartBar';
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
 import { useTimeTracker } from '../hooks/useTimeTracker';
 import { useAuth } from '../hooks/useAuth';
@@ -121,9 +121,9 @@ export default function Dashboard({ uid, displayName, photoURL }: DashboardProps
 
   return (
     <Box
+      className="glass-app-bg"
       sx={{
         minHeight: '100dvh',
-        bgcolor: 'background.default',
         display: 'flex',
         justifyContent: 'center',
       }}
@@ -168,7 +168,6 @@ export default function Dashboard({ uid, displayName, photoURL }: DashboardProps
                 variant={isIN ? 'filled' : 'outlined'}
                 sx={{ fontWeight: 700, letterSpacing: 1, fontSize: 10 }}
               />
-              <ThemeToggle />
               <Tooltip title={`Déconnexion de ${displayName ?? 'compte'}`}>
                 <IconButton size="small" onClick={handleSignOut} sx={{ ml: 0.5 }}>
                   {photoURL ? (
@@ -197,7 +196,7 @@ export default function Dashboard({ uid, displayName, photoURL }: DashboardProps
           </AnimatePresence>
 
           {/* ── Timer principal ────────────────────────────────────────────── */}
-          <MotionCard layout elevation={4} sx={{ borderRadius: 4, textAlign: 'center' }}>
+          <MotionCard layout className="glass-surface" sx={{ borderRadius: 4, textAlign: 'center' }}>
             <CardContent sx={{ py: 4 }}>
               <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: 2 }}>
                 CUMUL MENSUEL
@@ -225,7 +224,7 @@ export default function Dashboard({ uid, displayName, photoURL }: DashboardProps
           </MotionCard>
 
           {/* ── Cumul hebdo ────────────────────────────────────────────────── */}
-          <MotionCard layout variant="outlined">
+          <MotionCard layout className="glass-surface" sx={{ borderRadius: 3 }}>
             <CardContent
               sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', py: '12px !important' }}
             >
@@ -256,10 +255,10 @@ export default function Dashboard({ uid, displayName, photoURL }: DashboardProps
             {isIN && sessionStart && (
               <MotionBox key="session-card" {...slideDown}>
                 <Card
-                  variant="outlined"
+                  className="glass-surface"
                   sx={{
-                    borderColor: 'success.main',
-                    bgcolor: 'success.50',
+                    borderRadius: 3,
+                    borderColor: 'success.main !important',
                   }}
                 >
                   <CardContent
@@ -328,8 +327,18 @@ export default function Dashboard({ uid, displayName, photoURL }: DashboardProps
                       <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, letterSpacing: 1, display: 'block', mb: 0.5 }}>
                         {label.toUpperCase()}
                       </Typography>
-                      <Card variant="outlined">
+                      <Card className="glass-surface" sx={{ borderRadius: 3 }}>
                         <CardContent sx={{ p: '0 !important' }}>
+                          {/* Mini timeline pour ce jour */}
+                          <Box sx={{ px: 2, pt: 1.5, pb: 0.5 }}>
+                            <TimelineSmartBar
+                              sessions={entries}
+                              currentSessionStart={date === today ? currentSessionStart : null}
+                              status={date === today ? status : 'OUT'}
+                              mini={date !== today}
+                            />
+                          </Box>
+                          <Divider sx={{ opacity: 0.3 }} />
                           <motion.div variants={staggerContainer} initial="initial" animate="animate">
                             {entries.map((entry, i) => (
                               <motion.div key={entry.index} variants={staggerItem}>
