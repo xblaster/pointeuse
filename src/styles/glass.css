@@ -24,6 +24,19 @@
   }
 }
 
+/* ── Particle Float Animation ────────────────────────────────────────────── */
+
+@keyframes particle-float {
+  0%, 100% {
+    transform: translateY(calc(-50% - 6px));
+    opacity: 0.25;
+  }
+  50% {
+    transform: translateY(calc(-50% + 6px));
+    opacity: 0.6;
+  }
+}
+
 /* ── Organic Gradient Background ─────────────────────────────────────────── */
 
 .glass-app-bg {
