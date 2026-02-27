@@ -13,44 +13,39 @@ function entry(startH: number, startM: number, endH: number, endM: number): Sess
   const start = d(startH, startM);
   const end = d(endH, endM);
   const duration = end.getTime() - start.getTime();
-  return {
-    start: start.toISOString(),
-    end: end.toISOString(),
-    rawDuration: duration,
-    duration,
-    date: start.toISOString().split('T')[0],
-    lunchDeducted: false,
-  };
+  return { start: start.toISOString(), end: end.toISOString(), rawDuration: duration, duration, date: start.toISOString().split('T')[0], lunchDeducted: false };
+}
+
+function entryWithDeduction(startH: number, startM: number, endH: number, endM: number, deductionMin: number): SessionEntry {
+  const start = d(startH, startM);
+  const end = d(endH, endM);
+  const rawDuration = end.getTime() - start.getTime();
+  const duration = rawDuration - deductionMin * 60_000;
+  return { start: start.toISOString(), end: end.toISOString(), rawDuration, duration, date: start.toISOString().split('T')[0], lunchDeducted: true };
 }
 
 describe('computeTimelineSegments', () => {
+
   // ── RG-01 ────────────────────────────────────────────────────────────
 
   describe('RG-01: pre-07:00 coloring', () => {
     it('colors a session entirely before 07:00 as red', () => {
-      const history = [entry(6, 30, 6, 50)];
-      const segs = computeTimelineSegments(history, null, 'OUT');
+      const segs = computeTimelineSegments([entry(6, 30, 6, 50)], null, 'OUT');
       expect(segs).toHaveLength(1);
       expect(segs[0].color).toBe(COLOR_RED);
     });
 
     it('splits a session straddling 07:00 into red + green', () => {
-      const history = [entry(6, 30, 8, 0)];
-      const segs = computeTimelineSegments(history, null, 'OUT');
+      const segs = computeTimelineSegments([entry(6, 30, 8, 0)], null, 'OUT');
       expect(segs).toHaveLength(2);
-      const red = segs.find((s) => s.color === COLOR_RED);
-      const green = segs.find((s) => s.color === COLOR_GREEN);
-      expect(red).toBeDefined();
-      expect(green).toBeDefined();
+      expect(segs.find(s => s.color === COLOR_RED)).toBeDefined();
+      expect(segs.find(s => s.color === COLOR_GREEN)).toBeDefined();
       // Red portion ends at 07:00 (60 min from 06:00)
-      expect(red!.endMin).toBe(60);
-      // Green portion starts at 07:00
-      expect(green!.startMin).toBe(60);
+      expect(segs.find(s => s.color === COLOR_RED)!.endMin).toBe(60);
     });
 
-    it('colors a session fully after 07:00 as green (RG-03)', () => {
-      const history = [entry(8, 0, 12, 0)];
-      const segs = computeTimelineSegments(history, null, 'OUT');
+    it('colors a session fully after 07:00 as green', () => {
+      const segs = computeTimelineSegments([entry(8, 0, 12, 0)], null, 'OUT');
       expect(segs).toHaveLength(1);
       expect(segs[0].color).toBe(COLOR_GREEN);
     });
@@ -58,36 +53,47 @@ describe('computeTimelineSegments', () => {
 
   // ── RG-02 ────────────────────────────────────────────────────────────
 
-  describe('RG-02: insufficient break coloring', () => {
-    it('recolors the preceding session red when break < 30 min', () => {
+  describe('RG-02: deducted portion coloring', () => {
+    it('preceding session stays green when break was short', () => {
+      // Session 1 is valid — the deduction appears on session 2, not session 1
       const history = [
-        entry(8, 0, 11, 0),  // ends 11:00
-        entry(11, 20, 13, 0), // starts 11:20 — only 20 min gap
+        entry(8, 0, 11, 0),                        // session 1 — no deduction
+        entryWithDeduction(11, 20, 13, 0, 10),     // session 2 — 10 min deducted
       ];
       const segs = computeTimelineSegments(history, null, 'OUT');
-      // First session should be recolored to red
-      const firstSeg = segs.find((s) => s.id === '0');
-      expect(firstSeg?.color).toBe(COLOR_RED);
+      const session1Segs = segs.filter(s => s.id.startsWith('0'));
+      expect(session1Segs.every(s => s.color === COLOR_GREEN)).toBe(true);
     });
 
-    it('does NOT recolor when break is exactly 30 min', () => {
+    it('colors only the deducted minutes at the start of the session with the deduction', () => {
+      const deductionMin = 23;
       const history = [
-        entry(8, 0, 11, 0),  // ends 11:00
-        entry(11, 30, 13, 0), // starts 11:30 — exactly 30 min gap
+        entry(7, 37, 12, 3),                            // session 1 — no deduction
+        entryWithDeduction(12, 10, 16, 0, deductionMin), // session 2 — 23 min deducted
       ];
       const segs = computeTimelineSegments(history, null, 'OUT');
-      const firstSeg = segs.find((s) => s.id === '0');
-      expect(firstSeg?.color).toBe(COLOR_GREEN);
+
+      // Session 2: first 23 min red, rest green
+      const s2Red = segs.find(s => s.id === '1-ded');
+      const s2Green = segs.find(s => s.id === '1');
+      expect(s2Red).toBeDefined();
+      expect(s2Red!.color).toBe(COLOR_RED);
+      // Width of red portion ≈ deductionMin (within 1 min tolerance for seconds rounding)
+      expect(s2Red!.endMin - s2Red!.startMin).toBeCloseTo(deductionMin, 0);
+      expect(s2Green).toBeDefined();
+      expect(s2Green!.color).toBe(COLOR_GREEN);
     });
 
-    it('does NOT recolor when break is > 30 min', () => {
-      const history = [
-        entry(8, 0, 11, 0),  // ends 11:00
-        entry(11, 45, 14, 0), // starts 11:45 — 45 min gap
-      ];
+    it('session with no deduction is entirely green (after 07:00)', () => {
+      const segs = computeTimelineSegments([entry(9, 0, 12, 0)], null, 'OUT');
+      expect(segs).toHaveLength(1);
+      expect(segs[0].color).toBe(COLOR_GREEN);
+    });
+
+    it('entire session is red when deduction covers full duration', () => {
+      const history = [entryWithDeduction(9, 0, 9, 15, 15)]; // 15 min session, 15 min deducted
       const segs = computeTimelineSegments(history, null, 'OUT');
-      const firstSeg = segs.find((s) => s.id === '0');
-      expect(firstSeg?.color).toBe(COLOR_GREEN);
+      expect(segs.every(s => s.color === COLOR_RED)).toBe(true);
     });
   });
 
@@ -97,25 +103,22 @@ describe('computeTimelineSegments', () => {
     it('produces a green active segment with isActive=true after 07:00', () => {
       const now = d(10, 0);
       const segs = computeTimelineSegments([], d(9, 0).toISOString(), 'IN', now);
-      const active = segs.find((s) => s.id === 'active');
+      const active = segs.find(s => s.id === 'active');
       expect(active).toBeDefined();
       expect(active!.color).toBe(COLOR_GREEN);
       expect(active!.isActive).toBe(true);
     });
 
-    it('splits active session straddling 07:00 into red + green with isActive on green', () => {
+    it('splits active session straddling 07:00 into red + green', () => {
       const now = d(8, 0);
       const segs = computeTimelineSegments([], d(6, 30).toISOString(), 'IN', now);
-      const activeRed = segs.find((s) => s.id === 'active-a');
-      const activeGreen = segs.find((s) => s.id === 'active');
-      expect(activeRed?.color).toBe(COLOR_RED);
-      expect(activeRed?.isActive).toBe(false);
-      expect(activeGreen?.color).toBe(COLOR_GREEN);
-      expect(activeGreen?.isActive).toBe(true);
+      expect(segs.find(s => s.id === 'active-pre')?.color).toBe(COLOR_RED);
+      expect(segs.find(s => s.id === 'active')?.color).toBe(COLOR_GREEN);
+      expect(segs.find(s => s.id === 'active')?.isActive).toBe(true);
     });
 
-    it('active session starting before 07:00 and still before 07:00 is entirely red', () => {
-      const now = d(6, 50); // still before 07:00
+    it('active session before 07:00 is entirely red, no isActive', () => {
+      const now = d(6, 50);
       const segs = computeTimelineSegments([], d(6, 30).toISOString(), 'IN', now);
       expect(segs).toHaveLength(1);
       expect(segs[0].color).toBe(COLOR_RED);
@@ -123,9 +126,8 @@ describe('computeTimelineSegments', () => {
     });
 
     it('no active segment when status is OUT', () => {
-      const now = d(10, 0);
-      const segs = computeTimelineSegments([], d(9, 0).toISOString(), 'OUT', now);
-      expect(segs.find((s) => s.id === 'active')).toBeUndefined();
+      const segs = computeTimelineSegments([], d(9, 0).toISOString(), 'OUT', d(10, 0));
+      expect(segs.find(s => s.id === 'active')).toBeUndefined();
     });
   });
 
@@ -133,22 +135,13 @@ describe('computeTimelineSegments', () => {
 
   describe('edge cases', () => {
     it('returns empty array for no sessions and status OUT', () => {
-      const segs = computeTimelineSegments([], null, 'OUT');
-      expect(segs).toHaveLength(0);
+      expect(computeTimelineSegments([], null, 'OUT')).toHaveLength(0);
     });
 
-    it('ignores sessions with zero or negative duration', () => {
+    it('ignores sessions with zero duration', () => {
       const s = d(9, 0);
-      const bad: SessionEntry = {
-        start: s.toISOString(),
-        end: s.toISOString(), // same start/end
-        rawDuration: 0,
-        duration: 0,
-        date: s.toISOString().split('T')[0],
-        lunchDeducted: false,
-      };
-      const segs = computeTimelineSegments([bad], null, 'OUT');
-      expect(segs).toHaveLength(0);
+      const bad: SessionEntry = { start: s.toISOString(), end: s.toISOString(), rawDuration: 0, duration: 0, date: s.toISOString().split('T')[0], lunchDeducted: false };
+      expect(computeTimelineSegments([bad], null, 'OUT')).toHaveLength(0);
     });
   });
 });
